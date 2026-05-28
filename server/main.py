@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
+from datetime import datetime
+import uuid
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
 
 app = FastAPI(title="Factory Inventory Management System")
@@ -120,6 +122,37 @@ class CreatePurchaseOrderRequest(BaseModel):
     expected_delivery_date: str
     notes: Optional[str] = None
 
+
+class SubmitOrderItem(BaseModel):
+    sku: str
+    name: str
+    quantity: int
+    unit_price: float
+
+
+class SubmitOrderRequest(BaseModel):
+    items: List[SubmitOrderItem]
+    warehouse: str
+    expected_delivery: str
+    category: Optional[str] = None
+
+
+class Task(BaseModel):
+    id: str
+    title: str
+    priority: str
+    dueDate: str
+    status: str
+
+
+class CreateTaskRequest(BaseModel):
+    title: str
+    priority: str
+    dueDate: str
+
+# In-memory task store (created at runtime; not persisted)
+tasks: List[dict] = []
+
 # API endpoints
 @app.get("/")
 def root():
@@ -160,6 +193,39 @@ def get_order(order_id: str):
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     return order
+
+@app.post("/api/orders/submit", response_model=Order)
+def submit_order(req: SubmitOrderRequest):
+    """Create a restocking purchase order; appends to the in-memory orders list."""
+    if not req.items:
+        raise HTTPException(status_code=400, detail="At least one item required")
+
+    total_value = round(sum(it.quantity * it.unit_price for it in req.items), 2)
+
+    existing_po_numbers = [
+        o["order_number"] for o in orders
+        if o.get("order_number", "").startswith("PO-")
+    ]
+    if existing_po_numbers:
+        next_seq = max(int(n.split("-")[-1]) for n in existing_po_numbers) + 1
+    else:
+        next_seq = 1
+
+    new_order = {
+        "id": str(uuid.uuid4()),
+        "order_number": f"PO-{next_seq:05d}",
+        "customer": "Internal Restock",
+        "items": [it.model_dump() for it in req.items],
+        "status": "Submitted",
+        "order_date": datetime.now().isoformat(timespec="seconds"),
+        "expected_delivery": req.expected_delivery,
+        "total_value": total_value,
+        "actual_delivery": None,
+        "warehouse": req.warehouse,
+        "category": req.category,
+    }
+    orders.append(new_order)
+    return new_order
 
 @app.get("/api/demand", response_model=List[DemandForecast])
 def get_demand_forecasts():
@@ -303,6 +369,67 @@ def get_monthly_trends():
     result = list(months.values())
     result.sort(key=lambda x: x['month'])
     return result
+
+@app.get("/api/tasks", response_model=List[Task])
+def get_tasks():
+    """Get all runtime-created tasks"""
+    return tasks
+
+@app.post("/api/tasks", response_model=Task)
+def create_task(req: CreateTaskRequest):
+    """Create a new task"""
+    new_task = {
+        "id": str(uuid.uuid4()),
+        "title": req.title,
+        "priority": req.priority,
+        "dueDate": req.dueDate,
+        "status": "pending",
+    }
+    tasks.append(new_task)
+    return new_task
+
+@app.patch("/api/tasks/{task_id}", response_model=Task)
+def toggle_task(task_id: str):
+    """Toggle a task's status between pending and completed"""
+    for task in tasks:
+        if task["id"] == task_id:
+            task["status"] = "completed" if task["status"] == "pending" else "pending"
+            return task
+    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task(task_id: str):
+    """Delete a task"""
+    for index, task in enumerate(tasks):
+        if task["id"] == task_id:
+            tasks.pop(index)
+            return {"success": True, "id": task_id}
+    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+@app.post("/api/purchase-orders", response_model=PurchaseOrder)
+def create_purchase_order(req: CreatePurchaseOrderRequest):
+    """Create a purchase order for a backlog item"""
+    new_po = {
+        "id": str(uuid.uuid4()),
+        "backlog_item_id": req.backlog_item_id,
+        "supplier_name": req.supplier_name,
+        "quantity": req.quantity,
+        "unit_cost": req.unit_cost,
+        "expected_delivery_date": req.expected_delivery_date,
+        "status": "Pending",
+        "created_date": datetime.now().isoformat(timespec="seconds"),
+        "notes": req.notes,
+    }
+    purchase_orders.append(new_po)
+    return new_po
+
+@app.get("/api/purchase-orders/{backlog_item_id}", response_model=PurchaseOrder)
+def get_purchase_order_by_backlog_item(backlog_item_id: str):
+    """Get the purchase order associated with a backlog item"""
+    for po in purchase_orders:
+        if po["backlog_item_id"] == backlog_item_id:
+            return po
+    raise HTTPException(status_code=404, detail=f"No purchase order found for backlog item {backlog_item_id}")
 
 if __name__ == "__main__":
     import uvicorn

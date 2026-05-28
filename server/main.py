@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 import uuid
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
@@ -117,8 +117,8 @@ class PurchaseOrder(BaseModel):
 class CreatePurchaseOrderRequest(BaseModel):
     backlog_item_id: str
     supplier_name: str
-    quantity: int
-    unit_cost: float
+    quantity: int = Field(gt=0, le=1_000_000)
+    unit_cost: float = Field(gt=0, lt=1e7, allow_inf_nan=False)
     expected_delivery_date: str
     notes: Optional[str] = None
 
@@ -409,6 +409,12 @@ def delete_task(task_id: str):
 @app.post("/api/purchase-orders", response_model=PurchaseOrder)
 def create_purchase_order(req: CreatePurchaseOrderRequest):
     """Create a purchase order for a backlog item"""
+    if not any(item["id"] == req.backlog_item_id for item in backlog_items):
+        raise HTTPException(status_code=404, detail=f"Backlog item {req.backlog_item_id} not found")
+
+    if any(po["backlog_item_id"] == req.backlog_item_id for po in purchase_orders):
+        raise HTTPException(status_code=409, detail=f"A purchase order already exists for backlog item {req.backlog_item_id}")
+
     new_po = {
         "id": str(uuid.uuid4()),
         "backlog_item_id": req.backlog_item_id,
